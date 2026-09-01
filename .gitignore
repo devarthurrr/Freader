@@ -1,0 +1,7 @@
+node_modules/
+data/originals/
+data/extracted/
+data/covers/
+data/*.db
+data/*.db-wal
+data/*.db-shm

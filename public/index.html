@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="description" content="Freader — Your self-hosted comic and ebook reader">
+  <title>Freader</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs" type="module"></script>
+</head>
+<body>
+  <div id="app">
+    <!-- Navigation -->
+    <nav id="navbar">
+      <div class="nav-brand">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+          <line x1="8" y1="7" x2="16" y2="7"/>
+          <line x1="8" y1="11" x2="14" y2="11"/>
+        </svg>
+        <span>Freader</span>
+      </div>
+      <div class="nav-tabs">
+        <button class="nav-tab active" data-tab="library" id="tab-library">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+            <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+          </svg>
+          Library
+        </button>
+        <button class="nav-tab" data-tab="upload" id="tab-upload">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          Upload
+        </button>
+      </div>
+    </nav>
+
+    <!-- Library View -->
+    <main id="view-library" class="view active">
+      <div class="view-header">
+        <h1>Your Library</h1>
+        <div class="library-stats" id="library-stats"></div>
+      </div>
+      <div id="books-grid" class="books-grid">
+        <!-- Books will be rendered here -->
+      </div>
+      <div id="empty-library" class="empty-state" style="display:none;">
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.3">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+        </svg>
+        <p>Your library is empty</p>
+        <button class="btn-primary" onclick="switchTab('upload')">Upload your first book</button>
+      </div>
+    </main>
+
+    <!-- Upload View -->
+    <main id="view-upload" class="view">
+      <div class="view-header">
+        <h1>Upload</h1>
+        <p class="subtitle">Drag & drop or select CBR, CBZ, or PDF files</p>
+      </div>
+      <div id="upload-zone" class="upload-zone">
+        <div class="upload-zone-content">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          <p>Drop files here</p>
+          <span class="upload-hint">or click to browse</span>
+          <span class="upload-formats">CBR · CBZ · PDF — up to 500MB</span>
+        </div>
+        <input type="file" id="file-input" accept=".cbr,.cbz,.pdf" multiple hidden>
+      </div>
+      <div id="upload-queue" class="upload-queue"></div>
+    </main>
+
+    <!-- Reader View -->
+    <main id="view-reader" class="view reader-view">
+      <!-- Top bar -->
+      <div id="reader-controls" class="reader-controls">
+        <button class="reader-btn" id="reader-back" title="Back to library">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="19" y1="12" x2="5" y2="12"/>
+            <polyline points="12 19 5 12 12 5"/>
+          </svg>
+        </button>
+        <span id="reader-title" class="reader-title"></span>
+        <span id="reader-page-info" class="reader-page-info"></span>
+      </div>
+
+      <!-- Comic Reader -->
+      <div id="comic-reader" class="comic-reader" style="display:none;">
+        <div class="comic-nav-zone comic-nav-prev" id="comic-prev"></div>
+        <img id="comic-page" class="comic-page" alt="Comic page">
+        <div class="comic-nav-zone comic-nav-next" id="comic-next"></div>
+      </div>
+
+      <!-- PDF Reader -->
+      <div id="pdf-reader" class="pdf-reader" style="display:none;">
+        <canvas id="pdf-canvas"></canvas>
+      </div>
+
+      <!-- Bottom page slider -->
+      <div id="reader-bottom" class="reader-bottom">
+        <button class="page-nav-btn" id="btn-prev-page" title="Previous page">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <input type="range" id="page-slider" class="page-slider" min="1" max="1" value="1">
+        <button class="page-nav-btn" id="btn-next-page" title="Next page">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
