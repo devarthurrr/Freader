@@ -9,3 +9,4 @@ services:
       - ./data:/app/data
     environment:
       - PORT=3000
+      - COMICVINE_API_KEY=${COMICVINE_API_KEY:-}

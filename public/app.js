@@ -1116,6 +1116,16 @@ function setupReader() {
         });
     }
 
+    const repairBtn = document.getElementById('reader-repair-btn');
+    if (repairBtn) {
+        repairBtn.addEventListener('click', () => repairCurrentComic());
+    }
+
+    const retryBtn = document.getElementById('btn-retry-comic');
+    if (retryBtn) {
+        retryBtn.addEventListener('click', () => repairCurrentComic());
+    }
+
     // Keyboard navigation
     document.addEventListener('keydown', e => {
         if (currentView !== 'reader') return;
@@ -1166,6 +1176,36 @@ function setupReader() {
     }
 }
 
+let isRepairingComic = false;
+async function repairCurrentComic() {
+    if (!currentBook || currentBook.type === 'pdf' || isRepairingComic) return;
+    isRepairingComic = true;
+    showToast('Extracting comic archive...', false);
+
+    const repairBtn = document.getElementById('reader-repair-btn');
+    if (repairBtn) repairBtn.classList.add('loading-spin');
+
+    try {
+        const res = await fetch(`${API}/api/reader/${currentBook.id}/extract`, { method: 'POST' });
+        const data = await res.json();
+        if (data.success && data.total_pages > 0) {
+            totalPages = data.total_pages;
+            currentBook.total_pages = totalPages;
+            const sliderEl = document.getElementById('page-slider');
+            if (sliderEl) sliderEl.max = totalPages;
+            showToast(`Extracted ${totalPages} pages!`, false);
+            goToPage(currentPage || 1);
+        } else {
+            showToast('Extraction completed, but no pages found', true);
+        }
+    } catch (err) {
+        showToast('Failed to extract comic: ' + err.message, true);
+    } finally {
+        isRepairingComic = false;
+        if (repairBtn) repairBtn.classList.remove('loading-spin');
+    }
+}
+
 async function openBook(bookId) {
     try {
         const res = await fetch(`${API}/api/books/${bookId}`);
@@ -1176,14 +1216,21 @@ async function openBook(bookId) {
             currentFolderId = currentBook.folder_id;
         }
 
-        totalPages = currentBook.total_pages;
+        totalPages = currentBook.total_pages || 0;
         currentPage = currentBook.current_page || 1;
 
         const titleEl = document.getElementById('reader-title');
         const sliderEl = document.getElementById('page-slider');
+        const repairBtn = document.getElementById('reader-repair-btn');
 
         if (titleEl) titleEl.textContent = currentBook.title;
-        if (sliderEl) sliderEl.max = totalPages;
+        if (sliderEl) sliderEl.max = totalPages > 0 ? totalPages : 1;
+
+        if (currentBook.type === 'pdf') {
+            if (repairBtn) repairBtn.style.display = 'none';
+        } else {
+            if (repairBtn) repairBtn.style.display = 'flex';
+        }
 
         switchTab('reader');
 
@@ -1194,6 +1241,23 @@ async function openBook(bookId) {
         } else {
             document.getElementById('pdf-reader').style.display = 'none';
             document.getElementById('comic-reader').style.display = 'flex';
+
+            // If comic total_pages is 0, auto-extract
+            if (totalPages === 0) {
+                showToast('Extracting comic pages...', false);
+                try {
+                    const extRes = await fetch(`${API}/api/reader/${bookId}/extract`, { method: 'POST' });
+                    const extData = await extRes.json();
+                    if (extData.total_pages > 0) {
+                        totalPages = extData.total_pages;
+                        currentBook.total_pages = totalPages;
+                        if (sliderEl) sliderEl.max = totalPages;
+                    }
+                } catch (e) {
+                    console.warn('Auto-extract on open error:', e);
+                }
+            }
+
             goToPage(currentPage);
         }
     } catch (err) {
@@ -1203,14 +1267,15 @@ async function openBook(bookId) {
 
 function goToPage(page) {
     if (!currentBook) return;
-    if (page < 1 || page > totalPages) return;
+    if (page < 1) page = 1;
+    if (totalPages > 0 && page > totalPages) page = totalPages;
 
     currentPage = page;
 
     // Update UI
     const pageInfo = document.getElementById('reader-page-info');
     const slider = document.getElementById('page-slider');
-    if (pageInfo) pageInfo.textContent = `${currentPage} / ${totalPages}`;
+    if (pageInfo) pageInfo.textContent = totalPages > 0 ? `${currentPage} / ${totalPages}` : 'Loading...';
     if (slider) slider.value = currentPage;
 
     // Load content
@@ -1218,7 +1283,24 @@ function goToPage(page) {
         renderPDFPage(currentPage);
     } else {
         const img = document.getElementById('comic-page');
-        if (img) img.src = `${API}/api/reader/${currentBook.id}/page/${currentPage}`;
+        const errState = document.getElementById('comic-error-state');
+        if (errState) errState.style.display = 'none';
+
+        if (img) {
+            img.style.display = 'block';
+            img.onload = () => {
+                if (errState) errState.style.display = 'none';
+            };
+            img.onerror = () => {
+                img.style.display = 'none';
+                if (errState) {
+                    errState.style.display = 'flex';
+                    const errText = document.getElementById('comic-error-text');
+                    if (errText) errText.textContent = `Page ${currentPage} could not be loaded.`;
+                }
+            };
+            img.src = `${API}/api/reader/${currentBook.id}/page/${currentPage}`;
+        }
     }
 
     // Save progress
@@ -1350,6 +1432,11 @@ function setupCoverModal() {
 
     if (btnSearch) {
         btnSearch.addEventListener('click', () => searchOnlineCovers());
+    }
+
+    const btnAutoFetch = document.getElementById('btn-autofetch-cover');
+    if (btnAutoFetch) {
+        btnAutoFetch.addEventListener('click', () => autoFetchCoverForCurrentBook());
     }
 
     if (inputSearch) {
@@ -1597,6 +1684,29 @@ async function applyCoverFromUrl(url) {
         closeModal('modal-cover');
     } catch (err) {
         showToast(err.message, true);
+    }
+}
+
+async function autoFetchCoverForCurrentBook() {
+    if (!currentCoverBookId) return;
+    const btn = document.getElementById('btn-autofetch-cover');
+    if (btn) btn.disabled = true;
+    showToast('Fetching cover from Comic Vine...', false);
+
+    try {
+        const res = await fetch(`${API}/api/covers/autofetch/${currentCoverBookId}`, { method: 'POST' });
+        const data = await res.json();
+        if (data.success && data.cover_url) {
+            refreshBookCoverInUI(currentCoverBookId, data.cover_url);
+            showToast('Cover updated automatically from Comic Vine!', false);
+            closeModal('modal-cover');
+        } else {
+            showToast(data.error || 'No cover found on Comic Vine', true);
+        }
+    } catch (err) {
+        showToast('Auto-fetch failed: ' + err.message, true);
+    } finally {
+        if (btn) btn.disabled = false;
     }
 }
 

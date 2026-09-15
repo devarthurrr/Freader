@@ -3,7 +3,8 @@ const router = express.Router();
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { extractCBZ, extractCBR, countPDFPages, generateCoverFromImage, generateCoverFromPDF } = require('../utils/extract');
+const { extractArchive, countPDFPages, generateCoverFromImage, generateCoverFromPDF } = require('../utils/extract');
+const { autoFetchAndApplyCover } = require('../utils/covers');
 
 const ORIGINALS_DIR = path.join(__dirname, '..', 'data', 'originals');
 const EXTRACTED_DIR = path.join(__dirname, '..', 'data', 'extracted');
@@ -46,6 +47,7 @@ module.exports = function (db) {
             return res.status(400).json({ error: 'No file uploaded' });
         }
 
+        let bookId = null;
         try {
             const ext = path.extname(req.file.originalname).toLowerCase().replace('.', '');
             const title = req.body.title || path.basename(req.file.originalname, path.extname(req.file.originalname));
@@ -59,39 +61,40 @@ module.exports = function (db) {
                 'INSERT INTO books (title, type, filename, file_size, folder_id) VALUES (?, ?, ?, ?, ?)'
             ).run(title, ext, filename, fileSize, folderId);
 
-            const bookId = result.lastInsertRowid;
+            bookId = result.lastInsertRowid;
             let totalPages = 0;
             let coverPath = null;
 
-            if (ext === 'cbz') {
+            if (ext === 'cbz' || ext === 'cbr') {
                 const destDir = path.join(EXTRACTED_DIR, String(bookId));
-                const pages = await extractCBZ(filePath, destDir);
+                const pages = await extractArchive(filePath, destDir);
                 totalPages = pages.length;
 
-                // Generate cover from first page
+                // Generate cover from first page if file contains pages
                 if (pages.length > 0) {
                     coverPath = `data/covers/${bookId}.jpg`;
                     await generateCoverFromImage(
                         path.join(destDir, pages[0]),
                         path.join(__dirname, '..', coverPath)
                     );
-                }
-            } else if (ext === 'cbr') {
-                const destDir = path.join(EXTRACTED_DIR, String(bookId));
-                const pages = await extractCBR(filePath, destDir);
-                totalPages = pages.length;
-
-                if (pages.length > 0) {
-                    coverPath = `data/covers/${bookId}.jpg`;
-                    await generateCoverFromImage(
-                        path.join(destDir, pages[0]),
-                        path.join(__dirname, '..', coverPath)
-                    );
+                } else {
+                    // File does not contain pages: automatically fetch from Comic Vine
+                    coverPath = await autoFetchAndApplyCover(bookId, title, db, COVERS_DIR);
                 }
             } else if (ext === 'pdf') {
                 totalPages = await countPDFPages(filePath);
                 coverPath = `data/covers/${bookId}.jpg`;
-                await generateCoverFromPDF(filePath, path.join(__dirname, '..', coverPath));
+                const realCoverExtracted = await generateCoverFromPDF(filePath, path.join(__dirname, '..', coverPath));
+                if (!realCoverExtracted) {
+                    // Placeholder generated: try fetching real cover from Comic Vine / online
+                    const onlineCover = await autoFetchAndApplyCover(bookId, title, db, COVERS_DIR);
+                    if (onlineCover) coverPath = onlineCover;
+                }
+            }
+
+            // Fallback: if still no cover, attempt auto-fetch from Comic Vine
+            if (!coverPath) {
+                coverPath = await autoFetchAndApplyCover(bookId, title, db, COVERS_DIR);
             }
 
             // Update book with page count and cover
@@ -114,6 +117,12 @@ module.exports = function (db) {
             res.json({ success: true, book });
         } catch (err) {
             console.error('Upload error:', err);
+            if (bookId) {
+                try {
+                    db.prepare('DELETE FROM books WHERE id = ?').run(bookId);
+                    db.prepare('DELETE FROM reading_progress WHERE book_id = ?').run(bookId);
+                } catch (e) {}
+            }
             res.status(500).json({ error: err.message });
         }
     });

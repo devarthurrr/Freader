@@ -45,7 +45,7 @@ module.exports = function (db) {
     });
 
     // GET /api/books/:id — single book with progress and folder info
-    router.get('/:id', (req, res) => {
+    router.get('/:id', async (req, res) => {
         try {
             const book = db.prepare(`
                 SELECT b.*, rp.current_page, rp.updated_at as progress_updated, f.name as folder_name
@@ -56,6 +56,43 @@ module.exports = function (db) {
             `).get(req.params.id);
 
             if (!book) return res.status(404).json({ error: 'Book not found' });
+
+            // If comic total_pages is 0 or missing, check extracted dir or auto-extract
+            if (book.type !== 'pdf' && (!book.total_pages || book.total_pages === 0)) {
+                const path = require('path');
+                const fs = require('fs');
+                const { isImageFile, extractArchive, generateCoverFromImage } = require('../utils/extract');
+                const extractedDir = path.join(__dirname, '..', 'data', 'extracted', String(book.id));
+
+                let count = 0;
+                if (fs.existsSync(extractedDir)) {
+                    count = fs.readdirSync(extractedDir).filter(isImageFile).length;
+                }
+
+                if (count === 0) {
+                    const originalPath = path.join(__dirname, '..', 'data', 'originals', book.filename);
+                    if (fs.existsSync(originalPath)) {
+                        try {
+                            const pages = await extractArchive(originalPath, extractedDir);
+                            count = pages.length;
+                            if (count > 0 && (!book.cover_path || !fs.existsSync(path.join(__dirname, '..', book.cover_path)))) {
+                                const coverRel = `data/covers/${book.id}.jpg`;
+                                await generateCoverFromImage(path.join(extractedDir, pages[0]), path.join(__dirname, '..', coverRel));
+                                db.prepare('UPDATE books SET cover_path = ? WHERE id = ?').run(coverRel, book.id);
+                                book.cover_path = coverRel;
+                            }
+                        } catch (e) {
+                            console.warn('Auto-extract on book fetch failed:', e.message);
+                        }
+                    }
+                }
+
+                if (count > 0) {
+                    db.prepare('UPDATE books SET total_pages = ? WHERE id = ?').run(count, book.id);
+                    book.total_pages = count;
+                }
+            }
+
             res.json(book);
         } catch (err) {
             res.status(500).json({ error: err.message });

@@ -2,8 +2,11 @@ const path = require('path');
 const fs = require('fs');
 const unzipper = require('unzipper');
 const sharp = require('sharp');
+const { execFile } = require('child_process');
+const util = require('util');
+const execFileAsync = util.promisify(execFile);
 
-const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif'];
 
 function isImageFile(filename) {
     const ext = path.extname(filename).toLowerCase();
@@ -15,29 +18,146 @@ function naturalSort(a, b) {
 }
 
 /**
+ * Detect archive type by reading the first 8 bytes (magic bytes)
+ */
+function detectArchiveType(filePath) {
+    try {
+        const fd = fs.openSync(filePath, 'r');
+        const buffer = Buffer.alloc(8);
+        const bytesRead = fs.readSync(fd, buffer, 0, 8, 0);
+        fs.closeSync(fd);
+
+        if (bytesRead < 4) return 'unknown';
+
+        // ZIP magic: 'PK\x03\x04' or 'PK\x05\x06' or 'PK\x07\x08'
+        if (buffer[0] === 0x50 && buffer[1] === 0x4B) {
+            return 'zip';
+        }
+
+        // RAR magic: 'Rar!\x1A\x07' (RAR4 and RAR5)
+        if (buffer[0] === 0x52 && buffer[1] === 0x61 && buffer[2] === 0x72 && buffer[3] === 0x21) {
+            return 'rar';
+        }
+
+        // 7z magic: '7z\xBC\xAF\x27\x1C'
+        if (buffer[0] === 0x37 && buffer[1] === 0x7A && buffer[2] === 0xBC && buffer[3] === 0xAF) {
+            return '7z';
+        }
+
+        // PDF magic: '%PDF'
+        if (buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46) {
+            return 'pdf';
+        }
+    } catch (e) {
+        console.warn('detectArchiveType error:', e.message);
+    }
+    return 'unknown';
+}
+
+/**
+ * Recursively find all image files within a directory
+ */
+function findImageFilesRecursively(dir) {
+    let results = [];
+    if (!fs.existsSync(dir)) return results;
+    try {
+        const list = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of list) {
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                results = results.concat(findImageFilesRecursively(fullPath));
+            } else if (entry.isFile() && isImageFile(entry.name)) {
+                results.push(fullPath);
+            }
+        }
+    } catch (e) {
+        console.warn('findImageFilesRecursively error:', e.message);
+    }
+    return results;
+}
+
+/**
+ * Flatten and standardize extracted pages into destDir/page_0001.ext, page_0002.ext...
+ * Cleans up all subdirectories and non-image files.
+ */
+function organizeExtractedPages(destDir) {
+    const allImages = findImageFilesRecursively(destDir);
+    if (allImages.length === 0) return [];
+
+    // Sort images naturally
+    allImages.sort((a, b) => naturalSort(path.basename(a), path.basename(b)));
+
+    // Rename images sequentially to temporary names first to avoid collision
+    const tempNames = [];
+    for (let i = 0; i < allImages.length; i++) {
+        const ext = path.extname(allImages[i]).toLowerCase();
+        const tempPath = path.join(destDir, `__temp_page_${String(i + 1).padStart(4, '0')}${ext}`);
+        fs.renameSync(allImages[i], tempPath);
+        tempNames.push(tempPath);
+    }
+
+    // Clean up all subdirectories and non-image files in destDir
+    const entries = fs.readdirSync(destDir, { withFileTypes: true });
+    for (const entry of entries) {
+        const fullPath = path.join(destDir, entry.name);
+        if (entry.isDirectory()) {
+            fs.rmSync(fullPath, { recursive: true, force: true });
+        } else if (!entry.name.startsWith('__temp_page_')) {
+            fs.unlinkSync(fullPath);
+        }
+    }
+
+    // Rename temp pages to final page_XXXX.ext names
+    const pages = [];
+    for (let i = 0; i < tempNames.length; i++) {
+        const ext = path.extname(tempNames[i]).toLowerCase();
+        const pageName = `page_${String(i + 1).padStart(4, '0')}${ext}`;
+        const finalPath = path.join(destDir, pageName);
+        fs.renameSync(tempNames[i], finalPath);
+        pages.push(pageName);
+    }
+
+    return pages;
+}
+
+/**
  * Extract a CBZ (ZIP) archive to a destination directory
  */
 async function extractCBZ(filePath, destDir) {
     fs.mkdirSync(destDir, { recursive: true });
 
-    const directory = await unzipper.Open.file(filePath);
-    const imageFiles = directory.files
-        .filter(f => f.type === 'File' && isImageFile(f.path))
-        .sort((a, b) => naturalSort(a.path, b.path));
-
-    const pages = [];
-    for (let i = 0; i < imageFiles.length; i++) {
-        const file = imageFiles[i];
-        const ext = path.extname(file.path).toLowerCase();
-        const pageName = `page_${String(i + 1).padStart(4, '0')}${ext}`;
-        const destPath = path.join(destDir, pageName);
-
-        const content = await file.buffer();
-        fs.writeFileSync(destPath, content);
-        pages.push(pageName);
+    // Check if it's actually a RAR archive
+    const type = detectArchiveType(filePath);
+    if (type === 'rar') {
+        return extractCBR(filePath, destDir);
     }
 
-    return pages;
+    try {
+        const directory = await unzipper.Open.file(filePath);
+        const imageFiles = directory.files.filter(f => f.type === 'File' && isImageFile(f.path));
+
+        if (imageFiles.length === 0) {
+            // Might be a RAR disguised as ZIP
+            if (type !== 'rar') {
+                return extractCBR(filePath, destDir);
+            }
+            return [];
+        }
+
+        // Extract files
+        for (const file of imageFiles) {
+            const normalizedPath = file.path.replace(/\\/g, '/');
+            const targetFilePath = path.join(destDir, normalizedPath);
+            fs.mkdirSync(path.dirname(targetFilePath), { recursive: true });
+            const content = await file.buffer();
+            fs.writeFileSync(targetFilePath, content);
+        }
+
+        return organizeExtractedPages(destDir);
+    } catch (zipErr) {
+        console.warn('unzipper failed, attempting CBR fallback:', zipErr.message);
+        return extractCBR(filePath, destDir);
+    }
 }
 
 /**
@@ -46,54 +166,81 @@ async function extractCBZ(filePath, destDir) {
 async function extractCBR(filePath, destDir) {
     fs.mkdirSync(destDir, { recursive: true });
 
-    const { createExtractorFromFile } = require('node-unrar-js');
-    const wasmBinary = fs.readFileSync(
-        require.resolve('node-unrar-js/dist/js/unrar.wasm')
-    );
-
-    const extractor = await createExtractorFromFile({
-        filepath: filePath,
-        targetPath: destDir,
-        wasmBinary
-    });
-
-    const { files } = extractor.extract();
-    const extractedFiles = [];
-
-    for (const file of files) {
-        if (file.fileHeader && !file.fileHeader.flags.directory) {
-            const fname = file.fileHeader.name;
-            if (isImageFile(fname)) {
-                extractedFiles.push(fname);
-            }
-        }
+    // Check if it's actually a ZIP archive
+    const type = detectArchiveType(filePath);
+    if (type === 'zip') {
+        return extractCBZ(filePath, destDir);
     }
 
-    // Rename extracted files to sequential page names
-    extractedFiles.sort((a, b) => naturalSort(a, b));
-    const pages = [];
+    // 1. Try node-unrar-js
+    try {
+        const { createExtractorFromFile } = require('node-unrar-js');
+        const wasmBinary = fs.readFileSync(
+            require.resolve('node-unrar-js/dist/js/unrar.wasm')
+        );
 
-    for (let i = 0; i < extractedFiles.length; i++) {
-        const srcPath = path.join(destDir, extractedFiles[i]);
-        const ext = path.extname(extractedFiles[i]).toLowerCase();
-        const pageName = `page_${String(i + 1).padStart(4, '0')}${ext}`;
-        const destPath = path.join(destDir, pageName);
+        const extractor = await createExtractorFromFile({
+            filepath: filePath,
+            targetPath: destDir,
+            wasmBinary,
+            filenameTransform: (fn) => fn.replace(/\\/g, '/')
+        });
 
-        if (fs.existsSync(srcPath) && srcPath !== destPath) {
-            fs.renameSync(srcPath, destPath);
+        // Filter: only extract non-directory image files
+        const { files } = extractor.extract({
+            files: (header) => !header.flags.directory && isImageFile(header.name)
+        });
+
+        // Drain iterator to completion (mandatory in node-unrar-js to free C++ memory)
+        for (const _ of files) {}
+
+        const pages = organizeExtractedPages(destDir);
+        if (pages.length > 0) {
+            return pages;
         }
-        pages.push(pageName);
+    } catch (unrarErr) {
+        console.warn('node-unrar-js extraction error:', unrarErr.message);
     }
 
-    // Clean up any leftover subdirectories
-    const entries = fs.readdirSync(destDir, { withFileTypes: true });
-    for (const entry of entries) {
-        if (entry.isDirectory()) {
-            fs.rmSync(path.join(destDir, entry.name), { recursive: true, force: true });
-        }
-    }
+    // 2. Fallback to 7z CLI if available
+    try {
+        await execFileAsync('7z', ['x', '-y', `-o${destDir}`, filePath]);
+        const pages = organizeExtractedPages(destDir);
+        if (pages.length > 0) return pages;
+    } catch (e) {}
 
-    return pages;
+    // 3. Fallback to unrar CLI if available
+    try {
+        await execFileAsync('unrar', ['x', '-y', '-o+', filePath, destDir + '/']);
+        const pages = organizeExtractedPages(destDir);
+        if (pages.length > 0) return pages;
+    } catch (e) {}
+
+    // 4. Fallback to unzipper in case archive header was non-standard but zip-readable
+    try {
+        const pages = await extractCBZ(filePath, destDir);
+        if (pages.length > 0) return pages;
+    } catch (e) {}
+
+    throw new Error('Failed to extract CBR archive: no readable images found or unsupported format');
+}
+
+/**
+ * Unified archive extractor: automatically chooses CBR or CBZ based on magic bytes or extension
+ */
+async function extractArchive(filePath, destDir) {
+    const type = detectArchiveType(filePath);
+    if (type === 'zip') {
+        return extractCBZ(filePath, destDir);
+    } else if (type === 'rar') {
+        return extractCBR(filePath, destDir);
+    } else {
+        const ext = path.extname(filePath).toLowerCase();
+        if (ext === '.cbz') {
+            return extractCBZ(filePath, destDir);
+        }
+        return extractCBR(filePath, destDir);
+    }
 }
 
 /**
@@ -106,14 +253,13 @@ async function countPDFPages(filePath) {
     return data.numpages;
 }
 
-const { execFile } = require('child_process');
-const util = require('util');
-const execFileAsync = util.promisify(execFile);
-
 /**
  * Generate a cover thumbnail from a comic page image
  */
 async function generateCoverFromImage(imagePath, coverPath) {
+    const coversDir = path.dirname(coverPath);
+    fs.mkdirSync(coversDir, { recursive: true });
+
     await sharp(imagePath)
         .resize(300, 450, { fit: 'cover' })
         .jpeg({ quality: 85 })
@@ -124,6 +270,9 @@ async function generateCoverFromImage(imagePath, coverPath) {
  * Generate a cover thumbnail from an arbitrary image Buffer
  */
 async function generateCoverFromBuffer(buffer, coverPath) {
+    const coversDir = path.dirname(coverPath);
+    fs.mkdirSync(coversDir, { recursive: true });
+
     await sharp(buffer)
         .resize(300, 450, { fit: 'cover' })
         .jpeg({ quality: 85 })
@@ -149,7 +298,6 @@ async function generateCoverFromPDF(pdfPath, coverPath, pageNum = 1) {
             tempPrefix
         ]);
 
-        // Find the generated file (pdftoppm names it like tempPrefix-1.jpg or tempPrefix-01.jpg)
         const basePrefix = path.basename(tempPrefix);
         const candidates = fs.readdirSync(coversDir).filter(f => f.startsWith(basePrefix) && f.endsWith('.jpg'));
 
@@ -157,7 +305,7 @@ async function generateCoverFromPDF(pdfPath, coverPath, pageNum = 1) {
             const extractedImagePath = path.join(coversDir, candidates[0]);
             await generateCoverFromImage(extractedImagePath, coverPath);
             fs.unlinkSync(extractedImagePath);
-            return;
+            return true;
         }
     } catch (err) {
         console.warn('pdftoppm extraction failed or not available, falling back to SVG placeholder:', err.message);
@@ -183,6 +331,7 @@ async function generateCoverFromPDF(pdfPath, coverPath, pageNum = 1) {
     await sharp(Buffer.from(svg))
         .jpeg({ quality: 85 })
         .toFile(coverPath);
+    return false;
 }
 
 /**
@@ -194,13 +343,20 @@ async function generateCoverFromPage(book, pageNum, coverPath, originalsDir, ext
         if (!fs.existsSync(pdfPath)) throw new Error('PDF file not found');
         await generateCoverFromPDF(pdfPath, coverPath, pageNum);
     } else {
-        // CBR or CBZ: look in extracted dir
         const bookExtractedDir = path.join(extractedDir, String(book.id));
-        if (!fs.existsSync(bookExtractedDir)) {
-            throw new Error('Extracted pages not found for comic');
+        if (!fs.existsSync(bookExtractedDir) || fs.readdirSync(bookExtractedDir).filter(isImageFile).length === 0) {
+            // Auto-extract if missing
+            const originalPath = path.join(originalsDir, book.filename);
+            if (fs.existsSync(originalPath)) {
+                await extractArchive(originalPath, bookExtractedDir);
+            }
         }
 
-        const files = fs.readdirSync(bookExtractedDir).filter(isImageFile).sort();
+        const files = fs.readdirSync(bookExtractedDir).filter(isImageFile).sort(naturalSort);
+        if (files.length === 0) {
+            throw new Error('No images found in comic archive');
+        }
+
         const pageIdx = pageNum - 1;
         if (pageIdx < 0 || pageIdx >= files.length) {
             throw new Error(`Page ${pageNum} out of range (1 - ${files.length})`);
@@ -214,10 +370,14 @@ async function generateCoverFromPage(book, pageNum, coverPath, originalsDir, ext
 module.exports = {
     extractCBZ,
     extractCBR,
+    extractArchive,
+    detectArchiveType,
+    organizeExtractedPages,
     countPDFPages,
     generateCoverFromImage,
     generateCoverFromBuffer,
     generateCoverFromPDF,
     generateCoverFromPage,
-    isImageFile
+    isImageFile,
+    naturalSort
 };

@@ -269,5 +269,53 @@ module.exports = function (db) {
         }
     });
 
+    // POST /api/covers/autofetch/:bookId — automatically fetch first Comic Vine result for a book
+    router.post('/autofetch/:bookId', async (req, res) => {
+        try {
+            const { autoFetchAndApplyCover } = require('../utils/covers');
+            const bookId = parseInt(req.params.bookId, 10);
+            const book = db.prepare('SELECT * FROM books WHERE id = ?').get(bookId);
+            if (!book) return res.status(404).json({ error: 'Book not found' });
+
+            const coverPath = await autoFetchAndApplyCover(bookId, book.title, db, COVERS_DIR);
+            if (!coverPath) {
+                return res.status(404).json({
+                    error: 'No cover found on Comic Vine or online sources. Check Comic Vine API key in settings.'
+                });
+            }
+
+            res.json({
+                success: true,
+                book_id: bookId,
+                cover_url: `/api/reader/${bookId}/cover?t=${Date.now()}`
+            });
+        } catch (err) {
+            console.error('Auto-fetch cover error:', err);
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    // POST /api/covers/autofetch-missing — auto-fetch covers for all books missing a cover
+    router.post('/autofetch-missing', async (req, res) => {
+        try {
+            const { autoFetchAndApplyCover } = require('../utils/covers');
+            const books = db.prepare('SELECT id, title, cover_path FROM books').all();
+            let updatedCount = 0;
+
+            for (const book of books) {
+                const coverExists = book.cover_path && fs.existsSync(path.join(__dirname, '..', book.cover_path));
+                if (!coverExists) {
+                    const result = await autoFetchAndApplyCover(book.id, book.title, db, COVERS_DIR);
+                    if (result) updatedCount++;
+                }
+            }
+
+            res.json({ success: true, updated_count: updatedCount });
+        } catch (err) {
+            console.error('Auto-fetch missing covers error:', err);
+            res.status(500).json({ error: err.message });
+        }
+    });
+
     return router;
 };
