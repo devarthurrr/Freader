@@ -16,6 +16,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // API Routes
 app.use('/api/books', require('./routes/library')(db));
+app.use('/api/covers', require('./routes/covers')(db));
+app.use('/api/folders', require('./routes/folders')(db));
 app.use('/api/reader', require('./routes/reader')(db));
 app.use('/api/upload', require('./routes/upload')(db));
 

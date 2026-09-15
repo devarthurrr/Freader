@@ -52,11 +52,12 @@ module.exports = function (db) {
             const filePath = req.file.path;
             const filename = req.file.filename;
             const fileSize = req.file.size;
+            const folderId = req.body.folder_id ? parseInt(req.body.folder_id, 10) : null;
 
             // Insert book record first to get ID
             const result = db.prepare(
-                'INSERT INTO books (title, type, filename, file_size) VALUES (?, ?, ?, ?)'
-            ).run(title, ext, filename, fileSize);
+                'INSERT INTO books (title, type, filename, file_size, folder_id) VALUES (?, ?, ?, ?, ?)'
+            ).run(title, ext, filename, fileSize, folderId);
 
             const bookId = result.lastInsertRowid;
             let totalPages = 0;

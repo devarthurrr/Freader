@@ -106,6 +106,10 @@ async function countPDFPages(filePath) {
     return data.numpages;
 }
 
+const { execFile } = require('child_process');
+const util = require('util');
+const execFileAsync = util.promisify(execFile);
+
 /**
  * Generate a cover thumbnail from a comic page image
  */
@@ -117,11 +121,56 @@ async function generateCoverFromImage(imagePath, coverPath) {
 }
 
 /**
- * Generate a cover thumbnail from a PDF first page
+ * Generate a cover thumbnail from an arbitrary image Buffer
  */
-async function generateCoverFromPDF(pdfPath, coverPath) {
-    // We'll use a simple approach: create a placeholder cover for PDFs
-    // since rendering PDF pages server-side without heavy deps is complex
+async function generateCoverFromBuffer(buffer, coverPath) {
+    await sharp(buffer)
+        .resize(300, 450, { fit: 'cover' })
+        .jpeg({ quality: 85 })
+        .toFile(coverPath);
+}
+
+/**
+ * Generate a cover thumbnail from a PDF page using pdftoppm (with fallback to placeholder)
+ */
+async function generateCoverFromPDF(pdfPath, coverPath, pageNum = 1) {
+    const coversDir = path.dirname(coverPath);
+    fs.mkdirSync(coversDir, { recursive: true });
+
+    // Try extracting real page image using pdftoppm
+    const tempPrefix = path.join(coversDir, `temp_pdf_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`);
+    try {
+        await execFileAsync('pdftoppm', [
+            '-jpeg',
+            '-r', '150',
+            '-f', String(pageNum),
+            '-l', String(pageNum),
+            pdfPath,
+            tempPrefix
+        ]);
+
+        // Find the generated file (pdftoppm names it like tempPrefix-1.jpg or tempPrefix-01.jpg)
+        const basePrefix = path.basename(tempPrefix);
+        const candidates = fs.readdirSync(coversDir).filter(f => f.startsWith(basePrefix) && f.endsWith('.jpg'));
+
+        if (candidates.length > 0) {
+            const extractedImagePath = path.join(coversDir, candidates[0]);
+            await generateCoverFromImage(extractedImagePath, coverPath);
+            fs.unlinkSync(extractedImagePath);
+            return;
+        }
+    } catch (err) {
+        console.warn('pdftoppm extraction failed or not available, falling back to SVG placeholder:', err.message);
+    }
+
+    // Clean up any remaining temp files with this prefix
+    try {
+        const basePrefix = path.basename(tempPrefix);
+        const files = fs.readdirSync(coversDir).filter(f => f.startsWith(basePrefix));
+        for (const f of files) fs.unlinkSync(path.join(coversDir, f));
+    } catch (e) {}
+
+    // Fallback: create placeholder cover for PDFs
     const svg = `
     <svg width="300" height="450" xmlns="http://www.w3.org/2000/svg">
       <rect width="300" height="450" fill="#1a1a2e" rx="8"/>
@@ -136,11 +185,39 @@ async function generateCoverFromPDF(pdfPath, coverPath) {
         .toFile(coverPath);
 }
 
+/**
+ * Generate a cover from an arbitrary page of a book
+ */
+async function generateCoverFromPage(book, pageNum, coverPath, originalsDir, extractedDir) {
+    if (book.type === 'pdf') {
+        const pdfPath = path.join(originalsDir, book.filename);
+        if (!fs.existsSync(pdfPath)) throw new Error('PDF file not found');
+        await generateCoverFromPDF(pdfPath, coverPath, pageNum);
+    } else {
+        // CBR or CBZ: look in extracted dir
+        const bookExtractedDir = path.join(extractedDir, String(book.id));
+        if (!fs.existsSync(bookExtractedDir)) {
+            throw new Error('Extracted pages not found for comic');
+        }
+
+        const files = fs.readdirSync(bookExtractedDir).filter(isImageFile).sort();
+        const pageIdx = pageNum - 1;
+        if (pageIdx < 0 || pageIdx >= files.length) {
+            throw new Error(`Page ${pageNum} out of range (1 - ${files.length})`);
+        }
+
+        const pagePath = path.join(bookExtractedDir, files[pageIdx]);
+        await generateCoverFromImage(pagePath, coverPath);
+    }
+}
+
 module.exports = {
     extractCBZ,
     extractCBR,
     countPDFPages,
     generateCoverFromImage,
+    generateCoverFromBuffer,
     generateCoverFromPDF,
+    generateCoverFromPage,
     isImageFile
 };
